@@ -42,6 +42,23 @@ class MotionState(str, Enum):
     FAULT = "fault"               # 过流/卡死等故障
 
 
+class FaultReason(str, Enum):
+    """运动故障原因 (固件上报)。"""
+
+    OVERCURRENT = "overcurrent"    # 过流: 卡死/过载
+    STALL = "stall"                # 失速: 通电但无脉冲, 缠绕/卡死
+    TIMEOUT = "timeout"            # 行程超时: 超时未到限位
+    UNDERCURRENT = "undercurrent"  # 欠流: 绳断/脱落/电机空转
+
+
+FAULT_REASON_TEXT: dict[FaultReason, str] = {
+    FaultReason.OVERCURRENT: "过流(卡死/过载)",
+    FaultReason.STALL: "失速(缠绕/卡死, 电机通电不转)",
+    FaultReason.TIMEOUT: "行程超时(超时未到限位)",
+    FaultReason.UNDERCURRENT: "欠流(绳断/脱落/空转)",
+}
+
+
 class CommandRequest(BaseModel):
     actuator: Actuator
     action: Action
@@ -80,6 +97,10 @@ class Telemetry(BaseModel):
     vent_current: float | None = None     # 风口电机电流 A
     curtain_state: MotionState = MotionState.IDLE
     vent_state: MotionState = MotionState.IDLE
+    curtain_position: float | None = None  # 卷帘开度 % (0=全放下, 100=全卷起)
+    vent_position: float | None = None     # 风口开度 %
+    curtain_fault_reason: FaultReason | None = None
+    vent_fault_reason: FaultReason | None = None
     limits: LimitSwitches = Field(default_factory=LimitSwitches)
 
 
