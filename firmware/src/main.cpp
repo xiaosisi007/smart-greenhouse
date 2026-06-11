@@ -35,7 +35,10 @@ struct Actuator {
   uint8_t limitOpen, limitClose;   // 限位
   uint8_t adcCurrent;              // 电流检测
   float overCurrent;               // 过流阈值
-  Motion state = IDLE;
+  Motion state;
+  Actuator(uint8_t po, uint8_t pc, uint8_t lo, uint8_t lc, uint8_t adc, float oc)
+      : pinOpen(po), pinClose(pc), limitOpen(lo), limitClose(lc),
+        adcCurrent(adc), overCurrent(oc), state(IDLE) {}
 };
 
 Actuator curtain { RELAY_CURTAIN_UP, RELAY_CURTAIN_DOWN,
@@ -117,14 +120,14 @@ void applyCommand(const char* actuator, const char* action) {
 }
 
 void mqttCallback(char* topic, byte* payload, unsigned int len) {
-  StaticJsonDocument<256> doc;
+  JsonDocument doc;
   if (deserializeJson(doc, payload, len)) return;
   const char* actuator = doc["actuator"] | "";
   const char* action = doc["action"] | "";
   const char* cmdId = doc["cmd_id"] | "";
   applyCommand(actuator, action);
   // 回执
-  StaticJsonDocument<128> ack;
+  JsonDocument ack;
   ack["cmd_id"] = cmdId;
   char buf[128]; size_t n = serializeJson(ack, buf);
   mqtt.publish(topicAck, buf, n);
@@ -146,7 +149,7 @@ void scanButtons() {
 
 // ----------------------- 遥测上报 -----------------------
 void publishTelemetry() {
-  StaticJsonDocument<512> doc;
+  JsonDocument doc;
   if (hasSht) {
     float t = sht31.readTemperature();
     float h = sht31.readHumidity();
@@ -158,7 +161,7 @@ void publishTelemetry() {
   doc["vent_current"] = readCurrent(vent.adcCurrent);
   doc["curtain_state"] = motionStr(curtain.state);
   doc["vent_state"] = motionStr(vent.state);
-  JsonObject lim = doc.createNestedObject("limits");
+  JsonObject lim = doc["limits"].to<JsonObject>();
   lim["curtain_top"] = limitTriggered(curtain.limitOpen);
   lim["curtain_bottom"] = limitTriggered(curtain.limitClose);
   lim["vent_open"] = limitTriggered(vent.limitOpen);

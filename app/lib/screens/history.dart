@@ -108,7 +108,7 @@ class _HistoryScreenState extends State<HistoryScreen> {
                             isCurved: true,
                             dotData: const FlDotData(show: false),
                             belowBarData: BarAreaData(
-                                show: true, color: color.withOpacity(0.15)),
+                                show: true, color: color.withValues(alpha: 0.15)),
                           ),
                         ],
                       )),
