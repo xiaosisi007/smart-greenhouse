@@ -23,6 +23,10 @@
 #define LIMIT_VENT_OPEN      34 // 风口全开 (34/35 仅输入)
 #define LIMIT_VENT_CLOSED    35 // 风口全关
 
+// ---- 运动脉冲反馈 (卷轴霍尔/接近开关, 每转 N 个脉冲, 内部上拉, 下降沿计数) ----
+#define HALL_CURTAIN 5
+#define HALL_VENT    15
+
 // ---- 电流检测 (ACS712 模拟输入) ----
 #define CURRENT_CURTAIN_ADC 36 // VP
 #define CURRENT_VENT_ADC    39 // VN

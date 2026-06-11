@@ -7,14 +7,20 @@ from __future__ import annotations
 """
 
 from .models import (
+    FAULT_REASON_TEXT,
     Action,
     Actuator,
     Alarm,
     AutomationRule,
     CommandRequest,
+    FaultReason,
     MotionState,
     Telemetry,
 )
+
+
+def _fault_detail(reason: FaultReason | None) -> str:
+    return FAULT_REASON_TEXT.get(reason, "过流/卡死") if reason else "过流/卡死"
 
 
 def _at_limit_for(actuator: Actuator, action: Action, t: Telemetry) -> bool:
@@ -54,10 +60,12 @@ def evaluate(
     # ---- 安全告警 (始终评估, 不受 enabled 影响) ----
     if t.curtain_state is MotionState.FAULT:
         alarms.append(Alarm(device_id=t.device_id, ts=t.ts, level="critical",
-                            code="curtain_fault", message="卷帘电机故障/过流, 已停机"))
+                            code="curtain_fault",
+                            message=f"卷帘电机故障: {_fault_detail(t.curtain_fault_reason)}, 已停机"))
     if t.vent_state is MotionState.FAULT:
         alarms.append(Alarm(device_id=t.device_id, ts=t.ts, level="critical",
-                            code="vent_fault", message="风口电机故障/过流, 已停机"))
+                            code="vent_fault",
+                            message=f"风口电机故障: {_fault_detail(t.vent_fault_reason)}, 已停机"))
     if t.temperature is not None and t.temperature >= rule.vent_temp_high + 8:
         alarms.append(Alarm(device_id=t.device_id, ts=t.ts, level="warning",
                             code="over_temp", message=f"棚温过高 {t.temperature:.1f}℃"))

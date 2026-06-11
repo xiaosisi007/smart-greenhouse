@@ -20,7 +20,9 @@ class Telemetry {
   final String deviceId;
   final DateTime ts;
   final double? temperature, humidity, lux, curtainCurrent, ventCurrent;
+  final double? curtainPosition, ventPosition; // 开度 % (0=全关/放下, 100=全开/卷起)
   final String curtainState, ventState;
+  final String? curtainFaultReason, ventFaultReason;
   final LimitSwitches limits;
 
   Telemetry({
@@ -31,8 +33,12 @@ class Telemetry {
     this.lux,
     this.curtainCurrent,
     this.ventCurrent,
+    this.curtainPosition,
+    this.ventPosition,
     this.curtainState = 'idle',
     this.ventState = 'idle',
+    this.curtainFaultReason,
+    this.ventFaultReason,
     required this.limits,
   });
 
@@ -44,8 +50,12 @@ class Telemetry {
         lux: (j['lux'] as num?)?.toDouble(),
         curtainCurrent: (j['curtain_current'] as num?)?.toDouble(),
         ventCurrent: (j['vent_current'] as num?)?.toDouble(),
+        curtainPosition: (j['curtain_position'] as num?)?.toDouble(),
+        ventPosition: (j['vent_position'] as num?)?.toDouble(),
         curtainState: j['curtain_state'] ?? 'idle',
         ventState: j['vent_state'] ?? 'idle',
+        curtainFaultReason: j['curtain_fault_reason'],
+        ventFaultReason: j['vent_fault_reason'],
         limits: LimitSwitches.fromJson(j['limits'] ?? {}),
       );
 }

@@ -14,6 +14,7 @@ from .models import (
     Command,
     Device,
     DeviceStatus,
+    FaultReason,
     LimitSwitches,
     MotionState,
     Telemetry,
@@ -93,12 +94,16 @@ async def insert_telemetry(t: Telemetry) -> None:
         """
         INSERT INTO telemetry
             (device_id, ts, temperature, humidity, lux, curtain_current,
-             vent_current, curtain_state, vent_state, limits)
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+             vent_current, curtain_state, vent_state, curtain_position,
+             vent_position, curtain_fault_reason, vent_fault_reason, limits)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
         """,
         t.device_id, t.ts, t.temperature, t.humidity, t.lux,
         t.curtain_current, t.vent_current, t.curtain_state.value,
-        t.vent_state.value, json.dumps(t.limits.model_dump()),
+        t.vent_state.value, t.curtain_position, t.vent_position,
+        t.curtain_fault_reason.value if t.curtain_fault_reason else None,
+        t.vent_fault_reason.value if t.vent_fault_reason else None,
+        json.dumps(t.limits.model_dump()),
     )
 
 
@@ -112,6 +117,10 @@ def _row_to_telemetry(r: asyncpg.Record) -> Telemetry:
         vent_current=r["vent_current"],
         curtain_state=MotionState(r["curtain_state"]) if r["curtain_state"] else MotionState.IDLE,
         vent_state=MotionState(r["vent_state"]) if r["vent_state"] else MotionState.IDLE,
+        curtain_position=r["curtain_position"],
+        vent_position=r["vent_position"],
+        curtain_fault_reason=FaultReason(r["curtain_fault_reason"]) if r["curtain_fault_reason"] else None,
+        vent_fault_reason=FaultReason(r["vent_fault_reason"]) if r["vent_fault_reason"] else None,
         limits=LimitSwitches(**(limits or {})),
     )
 

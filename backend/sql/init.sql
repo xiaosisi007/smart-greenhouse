@@ -18,8 +18,17 @@ CREATE TABLE IF NOT EXISTS telemetry (
     vent_current     DOUBLE PRECISION,
     curtain_state    TEXT,
     vent_state       TEXT,
+    curtain_position DOUBLE PRECISION,
+    vent_position    DOUBLE PRECISION,
+    curtain_fault_reason TEXT,
+    vent_fault_reason    TEXT,
     limits           JSONB
 );
+-- 已有库升级 (init.sql 仅首次建库执行, 老库手动跑一次):
+ALTER TABLE telemetry ADD COLUMN IF NOT EXISTS curtain_position DOUBLE PRECISION;
+ALTER TABLE telemetry ADD COLUMN IF NOT EXISTS vent_position DOUBLE PRECISION;
+ALTER TABLE telemetry ADD COLUMN IF NOT EXISTS curtain_fault_reason TEXT;
+ALTER TABLE telemetry ADD COLUMN IF NOT EXISTS vent_fault_reason TEXT;
 SELECT create_hypertable('telemetry', 'ts', if_not_exists => TRUE);
 CREATE INDEX IF NOT EXISTS idx_telemetry_device_ts ON telemetry (device_id, ts DESC);
 

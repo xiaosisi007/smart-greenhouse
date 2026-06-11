@@ -26,6 +26,20 @@
 #define CURTAIN_OVERCURRENT_A 8.0f
 #define VENT_OVERCURRENT_A    6.0f
 
+// ---- 运动监测 (判断"是否正常在升降": 失速/超时/欠流) ----
+// 全行程脉冲数 (现场标定: 手动走一次全程读遥测脉冲计数). <=0 表示未装脉冲反馈, 关闭失速检测与开度计算
+#define CURTAIN_PULSES_FULL 200
+#define VENT_PULSES_FULL    150
+// 失速判定: 运动中超过该时间无新脉冲 => 卡死/缠绕
+#define STALL_TIMEOUT_MS    3000
+// 行程超时: 从启动到限位的最大允许时间 (按实测全程时间 x1.5 设置)
+#define CURTAIN_MAX_TRAVEL_MS 120000UL
+#define VENT_MAX_TRAVEL_MS    90000UL
+// 欠流判定: 启动 (留出启动浪涌时间) 后电流低于该值 => 绳断/链条脱落/电机空转. <=0 关闭
+#define CURTAIN_UNDERCURRENT_A 0.3f
+#define VENT_UNDERCURRENT_A    0.2f
+#define UNDERCURRENT_GRACE_MS  2000
+
 // ---- 本地兜底自动逻辑阈值 (断网时生效, 与后端规则保持一致) ----
 #define LOCAL_VENT_TEMP_HIGH      30.0f
 #define LOCAL_VENT_TEMP_HYST      3.0f

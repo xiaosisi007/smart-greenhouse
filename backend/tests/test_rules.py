@@ -4,6 +4,7 @@ from app.models import (
     Action,
     Actuator,
     AutomationRule,
+    FaultReason,
     LimitSwitches,
     MotionState,
     Telemetry,
@@ -86,6 +87,22 @@ def test_fault_raises_critical_alarm():
     t = Telemetry(device_id="gh1", curtain_state=MotionState.FAULT)
     _, alarms = evaluate(t, _rule())
     assert any(a.code == "curtain_fault" and a.level == "critical" for a in alarms)
+
+
+def test_fault_alarm_includes_reason():
+    t = Telemetry(device_id="gh1", curtain_state=MotionState.FAULT,
+                  curtain_fault_reason=FaultReason.STALL)
+    _, alarms = evaluate(t, _rule())
+    a = next(a for a in alarms if a.code == "curtain_fault")
+    assert "失速" in a.message
+
+
+def test_vent_fault_alarm_includes_reason():
+    t = Telemetry(device_id="gh1", vent_state=MotionState.FAULT,
+                  vent_fault_reason=FaultReason.UNDERCURRENT)
+    _, alarms = evaluate(t, _rule())
+    a = next(a for a in alarms if a.code == "vent_fault")
+    assert "欠流" in a.message
 
 
 def test_disabled_rule_emits_no_commands_but_still_alarms():
