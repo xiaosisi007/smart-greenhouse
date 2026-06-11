@@ -85,13 +85,12 @@ class _DashboardScreenState extends State<DashboardScreen> {
               ],
             ),
             const SizedBox(height: 16),
-            _stateCard('卷帘棉被', _t?.curtainState ?? 'idle', _t?.curtainPosition,
-                _t?.curtainFaultReason, _t?.limits.curtainTop ?? false,
-                _t?.limits.curtainBottom ?? false, '到顶', '到底'),
-            const SizedBox(height: 8),
-            _stateCard('顶部通风', _t?.ventState ?? 'idle', _t?.ventPosition,
-                _t?.ventFaultReason, _t?.limits.ventOpen ?? false,
-                _t?.limits.ventClosed ?? false, '全开', '全关'),
+            // 按电机列表动态渲染 (1/2/4 台; 旧固件合成卷帘+风口两张卡片)
+            for (final m in _t?.effectiveMotors ?? _defaultMotors())
+              Padding(
+                padding: const EdgeInsets.only(bottom: 8),
+                child: _motorCard(m, _t?.effectiveMotors ?? const []),
+              ),
           ],
         ),
       ),
@@ -121,8 +120,28 @@ class _DashboardScreenState extends State<DashboardScreen> {
     );
   }
 
-  Widget _stateCard(String name, String state, double? position, String? faultReason,
-      bool limA, bool limB, String labelA, String labelB) {
+  List<Motor> _defaultMotors() => [
+        Motor(id: 0, type: 'curtain'),
+        Motor(id: 1, type: 'vent'),
+      ];
+
+  String _motorLabel(Motor m, List<Motor> all) {
+    if (m.name != null && m.name!.isNotEmpty) return m.name!;
+    final base = m.type == 'curtain' ? '卷帘棉被' : '顶部通风';
+    final sameType = all.where((x) => x.type == m.type).length;
+    return sameType > 1 ? '$base #${m.id}' : base;
+  }
+
+  Widget _motorCard(Motor m, List<Motor> all) {
+    final name = _motorLabel(m, all);
+    final state = m.state;
+    final position = m.position;
+    final faultReason = m.faultReason;
+    final isCurtain = m.type == 'curtain';
+    final limA = m.limitOpen;
+    final limB = m.limitClose;
+    final labelA = isCurtain ? '到顶' : '全开';
+    final labelB = isCurtain ? '到底' : '全关';
     final moving = state.startsWith('moving');
     final fault = state == 'fault';
     return Card(

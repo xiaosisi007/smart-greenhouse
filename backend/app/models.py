@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 # ----------------------------- 执行器 / 指令 -----------------------------
@@ -62,6 +62,7 @@ FAULT_REASON_TEXT: dict[FaultReason, str] = {
 class CommandRequest(BaseModel):
     actuator: Actuator
     action: Action
+    motor_id: int | None = None  # 多电机: 目标电机编号; None=该类型第一台 (兼容旧协议)
     source: Literal["manual", "auto", "schedule"] = "manual"
 
     def validate_action(self) -> bool:
@@ -85,6 +86,20 @@ class LimitSwitches(BaseModel):
     vent_closed: bool = False     # 风口全关
 
 
+class MotorTelemetry(BaseModel):
+    """单台电机的遥测 (多电机固件 motors 数组中的一项)。"""
+
+    id: int
+    type: Actuator
+    name: str | None = None
+    state: MotionState = MotionState.IDLE
+    current: float | None = None       # 电机电流 A
+    position: float | None = None      # 开度 % (0=全关/放下, 100=全开/卷起)
+    fault_reason: FaultReason | None = None
+    limit_open: bool = False           # 开/卷起方向限位到位
+    limit_close: bool = False          # 关/放下方向限位到位
+
+
 class Telemetry(BaseModel):
     """设备上报的一帧遥测数据。"""
 
@@ -102,6 +117,48 @@ class Telemetry(BaseModel):
     curtain_fault_reason: FaultReason | None = None
     vent_fault_reason: FaultReason | None = None
     limits: LimitSwitches = Field(default_factory=LimitSwitches)
+    motors: list[MotorTelemetry] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _sync_motors(self) -> "Telemetry":
+        """motors 与旧版 curtain_*/vent_* 字段双向同步。
+
+        - 旧固件 (无 motors): 由 curtain/vent 字段合成 motors 数组;
+        - 新固件 (有 motors): 用首台卷帘/风口回填旧字段, 兼容历史查询与旧 App。
+        """
+        if not self.motors:
+            self.motors = [
+                MotorTelemetry(
+                    id=0, type=Actuator.CURTAIN, state=self.curtain_state,
+                    current=self.curtain_current, position=self.curtain_position,
+                    fault_reason=self.curtain_fault_reason,
+                    limit_open=self.limits.curtain_top, limit_close=self.limits.curtain_bottom,
+                ),
+                MotorTelemetry(
+                    id=1, type=Actuator.VENT, state=self.vent_state,
+                    current=self.vent_current, position=self.vent_position,
+                    fault_reason=self.vent_fault_reason,
+                    limit_open=self.limits.vent_open, limit_close=self.limits.vent_closed,
+                ),
+            ]
+            return self
+        first_curtain = next((m for m in self.motors if m.type is Actuator.CURTAIN), None)
+        first_vent = next((m for m in self.motors if m.type is Actuator.VENT), None)
+        if first_curtain is not None:
+            self.curtain_state = first_curtain.state
+            self.curtain_current = first_curtain.current
+            self.curtain_position = first_curtain.position
+            self.curtain_fault_reason = first_curtain.fault_reason
+            self.limits.curtain_top = first_curtain.limit_open
+            self.limits.curtain_bottom = first_curtain.limit_close
+        if first_vent is not None:
+            self.vent_state = first_vent.state
+            self.vent_current = first_vent.current
+            self.vent_position = first_vent.position
+            self.vent_fault_reason = first_vent.fault_reason
+            self.limits.vent_open = first_vent.limit_open
+            self.limits.vent_closed = first_vent.limit_close
+        return self
 
 
 # ----------------------------- 设备 -----------------------------
