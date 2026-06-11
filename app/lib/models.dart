@@ -16,6 +16,39 @@ class LimitSwitches {
       );
 }
 
+/// 单台电机遥测 (多电机固件 motors 数组中的一项)。
+class Motor {
+  final int id;
+  final String type; // curtain / vent
+  final String? name;
+  final String state;
+  final double? current, position;
+  final String? faultReason;
+  final bool limitOpen, limitClose;
+  Motor({
+    required this.id,
+    required this.type,
+    this.name,
+    this.state = 'idle',
+    this.current,
+    this.position,
+    this.faultReason,
+    this.limitOpen = false,
+    this.limitClose = false,
+  });
+  factory Motor.fromJson(Map<String, dynamic> j) => Motor(
+        id: j['id'] ?? 0,
+        type: j['type'] ?? 'curtain',
+        name: j['name'],
+        state: j['state'] ?? 'idle',
+        current: (j['current'] as num?)?.toDouble(),
+        position: (j['position'] as num?)?.toDouble(),
+        faultReason: j['fault_reason'],
+        limitOpen: j['limit_open'] ?? false,
+        limitClose: j['limit_close'] ?? false,
+      );
+}
+
 class Telemetry {
   final String deviceId;
   final DateTime ts;
@@ -24,6 +57,7 @@ class Telemetry {
   final String curtainState, ventState;
   final String? curtainFaultReason, ventFaultReason;
   final LimitSwitches limits;
+  final List<Motor> motors;
 
   Telemetry({
     required this.deviceId,
@@ -40,6 +74,7 @@ class Telemetry {
     this.curtainFaultReason,
     this.ventFaultReason,
     required this.limits,
+    this.motors = const [],
   });
 
   factory Telemetry.fromJson(Map<String, dynamic> j) => Telemetry(
@@ -57,7 +92,38 @@ class Telemetry {
         curtainFaultReason: j['curtain_fault_reason'],
         ventFaultReason: j['vent_fault_reason'],
         limits: LimitSwitches.fromJson(j['limits'] ?? {}),
+        motors: (j['motors'] as List?)
+                ?.map((e) => Motor.fromJson(e as Map<String, dynamic>))
+                .toList() ??
+            const [],
       );
+
+  /// motors 数组为空时 (旧固件), 由旧版字段合成两台电机, 供 UI 统一按列表渲染。
+  List<Motor> get effectiveMotors {
+    if (motors.isNotEmpty) return motors;
+    return [
+      Motor(
+        id: 0,
+        type: 'curtain',
+        state: curtainState,
+        current: curtainCurrent,
+        position: curtainPosition,
+        faultReason: curtainFaultReason,
+        limitOpen: limits.curtainTop,
+        limitClose: limits.curtainBottom,
+      ),
+      Motor(
+        id: 1,
+        type: 'vent',
+        state: ventState,
+        current: ventCurrent,
+        position: ventPosition,
+        faultReason: ventFaultReason,
+        limitOpen: limits.ventOpen,
+        limitClose: limits.ventClosed,
+      ),
+    ];
+  }
 }
 
 class Device {

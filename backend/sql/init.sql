@@ -22,13 +22,15 @@ CREATE TABLE IF NOT EXISTS telemetry (
     vent_position    DOUBLE PRECISION,
     curtain_fault_reason TEXT,
     vent_fault_reason    TEXT,
-    limits           JSONB
+    limits           JSONB,
+    motors           JSONB
 );
 -- 已有库升级 (init.sql 仅首次建库执行, 老库手动跑一次):
 ALTER TABLE telemetry ADD COLUMN IF NOT EXISTS curtain_position DOUBLE PRECISION;
 ALTER TABLE telemetry ADD COLUMN IF NOT EXISTS vent_position DOUBLE PRECISION;
 ALTER TABLE telemetry ADD COLUMN IF NOT EXISTS curtain_fault_reason TEXT;
 ALTER TABLE telemetry ADD COLUMN IF NOT EXISTS vent_fault_reason TEXT;
+ALTER TABLE telemetry ADD COLUMN IF NOT EXISTS motors JSONB;
 SELECT create_hypertable('telemetry', 'ts', if_not_exists => TRUE);
 CREATE INDEX IF NOT EXISTS idx_telemetry_device_ts ON telemetry (device_id, ts DESC);
 
@@ -38,9 +40,11 @@ CREATE TABLE IF NOT EXISTS commands (
     ts         TIMESTAMPTZ NOT NULL,
     actuator   TEXT NOT NULL,
     action     TEXT NOT NULL,
+    motor_id   INTEGER,
     source     TEXT NOT NULL,
     acked      BOOLEAN NOT NULL DEFAULT FALSE
 );
+ALTER TABLE commands ADD COLUMN IF NOT EXISTS motor_id INTEGER;
 CREATE INDEX IF NOT EXISTS idx_commands_device_ts ON commands (device_id, ts DESC);
 
 CREATE TABLE IF NOT EXISTS alarms (

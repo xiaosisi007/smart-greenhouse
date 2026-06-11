@@ -17,6 +17,7 @@ from .models import (
     FaultReason,
     LimitSwitches,
     MotionState,
+    MotorTelemetry,
     Telemetry,
 )
 
@@ -95,8 +96,8 @@ async def insert_telemetry(t: Telemetry) -> None:
         INSERT INTO telemetry
             (device_id, ts, temperature, humidity, lux, curtain_current,
              vent_current, curtain_state, vent_state, curtain_position,
-             vent_position, curtain_fault_reason, vent_fault_reason, limits)
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+             vent_position, curtain_fault_reason, vent_fault_reason, limits, motors)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
         """,
         t.device_id, t.ts, t.temperature, t.humidity, t.lux,
         t.curtain_current, t.vent_current, t.curtain_state.value,
@@ -104,6 +105,7 @@ async def insert_telemetry(t: Telemetry) -> None:
         t.curtain_fault_reason.value if t.curtain_fault_reason else None,
         t.vent_fault_reason.value if t.vent_fault_reason else None,
         json.dumps(t.limits.model_dump()),
+        json.dumps([m.model_dump() for m in t.motors]),
     )
 
 
@@ -111,6 +113,9 @@ def _row_to_telemetry(r: asyncpg.Record) -> Telemetry:
     limits = r["limits"]
     if isinstance(limits, str):
         limits = json.loads(limits)
+    motors = r["motors"] if "motors" in r.keys() else None
+    if isinstance(motors, str):
+        motors = json.loads(motors)
     return Telemetry(
         device_id=r["device_id"], ts=r["ts"], temperature=r["temperature"],
         humidity=r["humidity"], lux=r["lux"], curtain_current=r["curtain_current"],
@@ -122,6 +127,7 @@ def _row_to_telemetry(r: asyncpg.Record) -> Telemetry:
         curtain_fault_reason=FaultReason(r["curtain_fault_reason"]) if r["curtain_fault_reason"] else None,
         vent_fault_reason=FaultReason(r["vent_fault_reason"]) if r["vent_fault_reason"] else None,
         limits=LimitSwitches(**(limits or {})),
+        motors=[MotorTelemetry(**m) for m in (motors or [])],
     )
 
 
@@ -152,10 +158,10 @@ async def insert_command(c: Command) -> None:
     pool = _require_pool()
     await pool.execute(
         """
-        INSERT INTO commands (cmd_id, device_id, ts, actuator, action, source)
-        VALUES ($1,$2,$3,$4,$5,$6)
+        INSERT INTO commands (cmd_id, device_id, ts, actuator, action, motor_id, source)
+        VALUES ($1,$2,$3,$4,$5,$6,$7)
         """,
-        c.cmd_id, c.device_id, c.ts, c.actuator.value, c.action.value, c.source,
+        c.cmd_id, c.device_id, c.ts, c.actuator.value, c.action.value, c.motor_id, c.source,
     )
 
 

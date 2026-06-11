@@ -29,11 +29,17 @@ class Api {
     return list.map((e) => Telemetry.fromJson(e)).toList();
   }
 
-  Future<void> command(String deviceId, String actuator, String action) async {
+  Future<void> command(String deviceId, String actuator, String action,
+      {int? motorId}) async {
     await http.post(
       Uri.parse('$base/api/devices/$deviceId/command'),
       headers: {'Content-Type': 'application/json'},
-      body: jsonEncode({'actuator': actuator, 'action': action, 'source': 'manual'}),
+      body: jsonEncode({
+        'actuator': actuator,
+        'action': action,
+        'source': 'manual',
+        if (motorId != null) 'motor_id': motorId,
+      }),
     );
   }
 

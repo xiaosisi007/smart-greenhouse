@@ -138,12 +138,15 @@ class MqttBridge:
             **req.model_dump(),
         )
         await db.insert_command(cmd)
-        payload = json.dumps({
+        body = {
             "cmd_id": cmd.cmd_id,
             "actuator": cmd.actuator.value,
             "action": cmd.action.value,
             "source": cmd.source,
-        })
+        }
+        if cmd.motor_id is not None:
+            body["motor_id"] = cmd.motor_id
+        payload = json.dumps(body)
         if self._client is not None:
             await self._client.publish(self._topic(device_id, "cmd"), payload, qos=1)
         else:

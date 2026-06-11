@@ -110,3 +110,57 @@ def test_disabled_rule_emits_no_commands_but_still_alarms():
     cmds, alarms = evaluate(t, _rule(enabled=False, vent_temp_high=30.0))
     assert cmds == []
     assert any(a.code == "over_temp" for a in alarms)
+
+
+# ----------------------------- 多电机 (motors 数组) -----------------------------
+
+from app.models import MotorTelemetry  # noqa: E402
+
+
+def test_motors_synthesized_from_legacy_fields():
+    t = Telemetry(device_id="gh1", curtain_state=MotionState.MOVING_OPEN,
+                  curtain_position=40.0, vent_state=MotionState.IDLE)
+    assert len(t.motors) == 2
+    assert t.motors[0].type is Actuator.CURTAIN
+    assert t.motors[0].state is MotionState.MOVING_OPEN
+    assert t.motors[0].position == 40.0
+    assert t.motors[1].type is Actuator.VENT
+
+
+def test_legacy_fields_filled_from_motors():
+    t = Telemetry(device_id="gh1", motors=[
+        MotorTelemetry(id=0, type=Actuator.CURTAIN, state=MotionState.FAULT,
+                       fault_reason=FaultReason.STALL, position=55.0, limit_close=True),
+        MotorTelemetry(id=1, type=Actuator.VENT, state=MotionState.MOVING_OPEN),
+    ])
+    assert t.curtain_state is MotionState.FAULT
+    assert t.curtain_fault_reason is FaultReason.STALL
+    assert t.curtain_position == 55.0
+    assert t.limits.curtain_bottom is True
+    assert t.vent_state is MotionState.MOVING_OPEN
+
+
+def test_per_motor_fault_alarm_with_index():
+    t = Telemetry(device_id="gh1", motors=[
+        MotorTelemetry(id=0, type=Actuator.CURTAIN),
+        MotorTelemetry(id=1, type=Actuator.CURTAIN, state=MotionState.FAULT,
+                       fault_reason=FaultReason.STALL),
+        MotorTelemetry(id=2, type=Actuator.VENT),
+        MotorTelemetry(id=3, type=Actuator.VENT),
+    ])
+    _, alarms = evaluate(t, _rule())
+    a = next(a for a in alarms if a.code == "curtain_fault")
+    assert "#1" in a.message and "失速" in a.message
+
+
+def test_auto_command_per_motor_skips_at_limit():
+    t = Telemetry(device_id="gh1", temperature=35.0, lux=5000, motors=[
+        MotorTelemetry(id=0, type=Actuator.CURTAIN),
+        MotorTelemetry(id=1, type=Actuator.CURTAIN),
+        MotorTelemetry(id=2, type=Actuator.VENT, limit_open=True),
+        MotorTelemetry(id=3, type=Actuator.VENT),
+    ])
+    cmds, _ = evaluate(t, _rule(vent_temp_high=30.0))
+    vent_cmds = [c for c in cmds if c.actuator is Actuator.VENT]
+    assert len(vent_cmds) == 1 and vent_cmds[0].motor_id == 3
+    assert vent_cmds[0].action is Action.OPEN

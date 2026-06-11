@@ -1,8 +1,9 @@
 /*
- * 智能大棚控制器固件
+ * 智能大棚控制器固件 (1/2/4 电机可配置)
  * ESP32 + SIM7600(4G) + SHT31(温湿度) + BH1750(光照)
  * 功能: 卷帘棉被升降 / 顶部通风 / 温湿度光照采集 / MQTT 上云与远程控制
  *       限位停机 + 过流保护 + 正反转互锁 + 本地手动按钮 + 断网本地兜底
+ * 电机数量由 config.h 的 MOTOR_COUNT 决定 (4 台时经 MCP23017 + ADS1115 扩展)
  */
 #include <Arduino.h>
 #include <Wire.h>
@@ -15,6 +16,12 @@
 #include "config.h"
 #include "pins.h"
 
+#if MOTOR_COUNT > 2
+#define USE_EXPANDER 1
+#include <Adafruit_MCP23X17.h>
+#include <Adafruit_ADS1X15.h>
+#endif
+
 // ----------------------- 全局对象 -----------------------
 #define SerialMon Serial
 #define SerialAT Serial2
@@ -24,6 +31,10 @@ TinyGsmClient gsmClient(modem);
 PubSubClient mqtt(gsmClient);
 Adafruit_SHT31 sht31;
 BH1750 lightMeter;
+#ifdef USE_EXPANDER
+Adafruit_MCP23X17 mcp;   // 继电器 + 限位扩展
+Adafruit_ADS1115 ads;    // 电流采样扩展
+#endif
 
 bool hasSht = false;
 bool hasLux = false;
@@ -31,82 +42,85 @@ bool hasLux = false;
 // 执行器状态机
 enum Motion { IDLE, MOVING_OPEN, MOVING_CLOSE, FAULT };
 struct Actuator {
-  uint8_t pinOpen, pinClose;       // 继电器
-  uint8_t limitOpen, limitClose;   // 限位
-  uint8_t adcCurrent;              // 电流检测
-  float overCurrent;               // 过流阈值
-  float underCurrent;              // 欠流阈值 (绳断/空转), <=0 关闭
-  int32_t pulsesFull;              // 全行程脉冲数, <=0 表示未装脉冲反馈
-  uint32_t maxTravelMs;            // 行程超时
+  MotorIO io;
+  MotorParams prm;
   Motion state;
   // 运动监测运行时状态
   uint32_t seenPulses;             // 已消费的 ISR 脉冲计数
   int32_t position;                // 当前位置 (脉冲数, 0=全关/全放下)
   unsigned long moveStartMs, lastPulseMs;
   const char* faultReason;
-  Actuator(uint8_t po, uint8_t pc, uint8_t lo, uint8_t lc, uint8_t adc,
-           float oc, float uc, int32_t pf, uint32_t mt)
-      : pinOpen(po), pinClose(pc), limitOpen(lo), limitClose(lc),
-        adcCurrent(adc), overCurrent(oc), underCurrent(uc), pulsesFull(pf),
-        maxTravelMs(mt), state(IDLE), seenPulses(0), position(0),
-        moveStartMs(0), lastPulseMs(0), faultReason("") {}
 };
 
-Actuator curtain { RELAY_CURTAIN_UP, RELAY_CURTAIN_DOWN,
-                   LIMIT_CURTAIN_TOP, LIMIT_CURTAIN_BOTTOM,
-                   CURRENT_CURTAIN_ADC, CURTAIN_OVERCURRENT_A,
-                   CURTAIN_UNDERCURRENT_A, CURTAIN_PULSES_FULL, CURTAIN_MAX_TRAVEL_MS };
-Actuator vent { RELAY_VENT_OPEN, RELAY_VENT_CLOSE,
-                LIMIT_VENT_OPEN, LIMIT_VENT_CLOSED,
-                CURRENT_VENT_ADC, VENT_OVERCURRENT_A,
-                VENT_UNDERCURRENT_A, VENT_PULSES_FULL, VENT_MAX_TRAVEL_MS };
+Actuator motors[MOTOR_COUNT];
 
-// 脉冲反馈 ISR (卷轴霍尔/接近开关)
-volatile uint32_t curtainPulses = 0, ventPulses = 0;
-void IRAM_ATTR curtainPulseISR() { curtainPulses++; }
-void IRAM_ATTR ventPulseISR() { ventPulses++; }
+// 脉冲反馈 ISR (卷轴霍尔/接近开关), attachInterruptArg 共用一个 ISR
+volatile uint32_t pulseCount[MOTOR_COUNT];
+void IRAM_ATTR pulseISR(void* arg) { (*(volatile uint32_t*)arg)++; }
 
 char topicTelemetry[64], topicStatus[64], topicCmd[64], topicAck[64];
 unsigned long lastTelemetry = 0;
 
-// ----------------------- 继电器底层 -----------------------
-inline void relayWrite(uint8_t pin, bool on) {
+// ----------------------- IO 抽象 (直连 GPIO / MCP23017 / ADS1115) -----------------------
+void ioWrite(const MotorIO &io, uint8_t pin, uint8_t lvl) {
+#ifdef USE_EXPANDER
+  if (io.onExpander) { mcp.digitalWrite(pin, lvl); return; }
+#endif
+  digitalWrite(pin, lvl);
+}
+
+int ioRead(const MotorIO &io, uint8_t pin) {
+#ifdef USE_EXPANDER
+  if (io.onExpander) return mcp.digitalRead(pin);
+#endif
+  return digitalRead(pin);
+}
+
+inline void relayWrite(const MotorIO &io, uint8_t pin, bool on) {
 #if RELAY_ACTIVE_LOW
-  digitalWrite(pin, on ? LOW : HIGH);
+  ioWrite(io, pin, on ? LOW : HIGH);
 #else
-  digitalWrite(pin, on ? HIGH : LOW);
+  ioWrite(io, pin, on ? HIGH : LOW);
 #endif
 }
 
-// 立即停止某执行器 (双继电器全部断开)
-void actuatorStop(Actuator &a) {
-  relayWrite(a.pinOpen, false);
-  relayWrite(a.pinClose, false);
-  if (a.state != FAULT) a.state = IDLE;
+// 限位: 上拉, 触发为低
+bool limitOpenHit(const Actuator &a)  { return ioRead(a.io, a.io.limitOpen) == LOW; }
+bool limitCloseHit(const Actuator &a) { return ioRead(a.io, a.io.limitClose) == LOW; }
+
+float readCurrent(const Actuator &a) {
+  // ACS712-20A: 100mV/A, 2.5V 偏置. 简化读数 (实际需多次采样取RMS)
+#ifdef USE_EXPANDER
+  if (a.io.onExpander) {
+    float v = ads.computeVolts(ads.readADC_SingleEnded(a.io.currentCh));
+    return fabs(v - 2.5f) / 0.100f;
+  }
+#endif
+  int raw = analogRead(a.io.currentCh);
+  float v = raw * 3.3f / 4095.0f;
+  return fabs(v - 2.5f) / 0.100f;
 }
 
-bool limitTriggered(uint8_t pin) { return digitalRead(pin) == LOW; } // 上拉, 触发为低
+// ----------------------- 执行器控制 -----------------------
+// 立即停止某执行器 (双继电器全部断开)
+void actuatorStop(Actuator &a) {
+  relayWrite(a.io, a.io.relayOpen, false);
+  relayWrite(a.io, a.io.relayClose, false);
+  if (a.state != FAULT) a.state = IDLE;
+}
 
 // 朝某方向驱动, 内置互锁 + 限位检查
 void actuatorMove(Actuator &a, bool openDir) {
   if (a.state == FAULT) return;
-  uint8_t limit = openDir ? a.limitOpen : a.limitClose;
-  if (limitTriggered(limit)) { actuatorStop(a); return; } // 已到位, 不动
+  if (openDir ? limitOpenHit(a) : limitCloseHit(a)) { actuatorStop(a); return; } // 已到位, 不动
   Motion target = openDir ? MOVING_OPEN : MOVING_CLOSE;
   if (a.state == target) return; // 已在朝该方向运动, 不重置监测计时
   // 互锁: 先断开反向, 再接通正向
-  relayWrite(openDir ? a.pinClose : a.pinOpen, false);
+  relayWrite(a.io, openDir ? a.io.relayClose : a.io.relayOpen, false);
   delay(50);
-  relayWrite(openDir ? a.pinOpen : a.pinClose, true);
+  relayWrite(a.io, openDir ? a.io.relayOpen : a.io.relayClose, true);
   a.state = target;
   a.moveStartMs = a.lastPulseMs = millis();
-}
-
-float readCurrent(uint8_t adcPin) {
-  // ACS712-20A: 100mV/A, 2.5V 偏置. 简化读数 (实际需多次采样取RMS)
-  int raw = analogRead(adcPin);
-  float v = raw * 3.3f / 4095.0f;
-  return fabs(v - 2.5f) / 0.100f;
 }
 
 void actuatorFault(Actuator &a, const char* reason) {
@@ -127,21 +141,21 @@ void actuatorSafety(Actuator &a, volatile uint32_t &pulseCounter) {
     else if (a.state == MOVING_CLOSE) a.position -= delta;
   }
   // 限位处校准位置
-  if (limitTriggered(a.limitOpen) && a.pulsesFull > 0) a.position = a.pulsesFull;
-  if (limitTriggered(a.limitClose)) a.position = 0;
+  if (limitOpenHit(a) && a.prm.pulsesFull > 0) a.position = a.prm.pulsesFull;
+  if (limitCloseHit(a)) a.position = 0;
 
-  if (a.state == MOVING_OPEN && limitTriggered(a.limitOpen)) actuatorStop(a);
-  if (a.state == MOVING_CLOSE && limitTriggered(a.limitClose)) actuatorStop(a);
+  if (a.state == MOVING_OPEN && limitOpenHit(a)) actuatorStop(a);
+  if (a.state == MOVING_CLOSE && limitCloseHit(a)) actuatorStop(a);
   if (a.state == MOVING_OPEN || a.state == MOVING_CLOSE) {
     unsigned long now = millis();
-    if (readCurrent(a.adcCurrent) > a.overCurrent)
+    if (readCurrent(a) > a.prm.overA)
       actuatorFault(a, "overcurrent");          // 卡死/过载
-    else if (a.pulsesFull > 0 && now - a.lastPulseMs > STALL_TIMEOUT_MS)
+    else if (a.prm.pulsesFull > 0 && now - a.lastPulseMs > STALL_TIMEOUT_MS)
       actuatorFault(a, "stall");                // 电机通电但不转: 缠绕/卡死
-    else if (now - a.moveStartMs > a.maxTravelMs)
+    else if (now - a.moveStartMs > a.prm.maxTravelMs)
       actuatorFault(a, "timeout");              // 超最大行程时间未到限位
-    else if (a.underCurrent > 0 && now - a.moveStartMs > UNDERCURRENT_GRACE_MS
-             && readCurrent(a.adcCurrent) < a.underCurrent)
+    else if (a.prm.underA > 0 && now - a.moveStartMs > UNDERCURRENT_GRACE_MS
+             && readCurrent(a) < a.prm.underA)
       actuatorFault(a, "undercurrent");         // 绳断/脱落/空转
   }
 }
@@ -157,15 +171,22 @@ void clearFault(Actuator &a) {
   if (a.state == FAULT) { a.state = IDLE; a.faultReason = ""; }
 }
 
-void applyCommand(const char* actuator, const char* action) {
-  if (strcmp(actuator, "curtain") == 0) {
-    if (strcmp(action, "up") == 0) { clearFault(curtain); actuatorMove(curtain, true); }
-    else if (strcmp(action, "down") == 0) { clearFault(curtain); actuatorMove(curtain, false); }
-    else if (strcmp(action, "stop") == 0) actuatorStop(curtain);
-  } else if (strcmp(actuator, "vent") == 0) {
-    if (strcmp(action, "open") == 0) { clearFault(vent); actuatorMove(vent, true); }
-    else if (strcmp(action, "close") == 0) { clearFault(vent); actuatorMove(vent, false); }
-    else if (strcmp(action, "stop") == 0) actuatorStop(vent);
+// 该类型第一台电机编号 (兼容不带 motor_id 的旧协议)
+int firstMotorOfType(uint8_t type) {
+  for (int i = 0; i < MOTOR_COUNT; i++)
+    if (motors[i].prm.type == type) return i;
+  return -1;
+}
+
+void applyCommand(int motorId, const char* action) {
+  if (motorId < 0 || motorId >= MOTOR_COUNT) return;
+  Actuator &a = motors[motorId];
+  if (strcmp(action, "up") == 0 || strcmp(action, "open") == 0) {
+    clearFault(a); actuatorMove(a, true);
+  } else if (strcmp(action, "down") == 0 || strcmp(action, "close") == 0) {
+    clearFault(a); actuatorMove(a, false);
+  } else if (strcmp(action, "stop") == 0) {
+    actuatorStop(a);
   }
 }
 
@@ -175,7 +196,10 @@ void mqttCallback(char* topic, byte* payload, unsigned int len) {
   const char* actuator = doc["actuator"] | "";
   const char* action = doc["action"] | "";
   const char* cmdId = doc["cmd_id"] | "";
-  applyCommand(actuator, action);
+  int motorId = doc["motor_id"] | -1;
+  if (motorId < 0)  // 旧协议: 按类型路由到该类型第一台
+    motorId = firstMotorOfType(strcmp(actuator, "vent") == 0 ? 1 : 0);
+  applyCommand(motorId, action);
   // 回执
   JsonDocument ack;
   ack["cmd_id"] = cmdId;
@@ -183,18 +207,19 @@ void mqttCallback(char* topic, byte* payload, unsigned int len) {
   mqtt.publish(topicAck, buf, n);
 }
 
-// ----------------------- 本地按钮 -----------------------
+// ----------------------- 本地按钮 (仅 <=2 电机配置, 4 电机引脚被霍尔复用) -----------------------
 void scanButtons() {
-  // 按下=LOW. 点动: 按住则动, 松开停 (仅在该执行器非故障时)
+#if MOTOR_COUNT <= 2
+  // 按下=LOW. 点动: 按住则动 (仅在该执行器非故障时); 自动运动靠限位/指令停
+  int curtainId = firstMotorOfType(0);
+  int ventId = firstMotorOfType(1);
   bool cu = digitalRead(BTN_CURTAIN_UP) == LOW;
   bool cd = digitalRead(BTN_CURTAIN_DOWN) == LOW;
   bool vo = digitalRead(BTN_VENT_OPEN) == LOW;
   bool vc = digitalRead(BTN_VENT_CLOSE) == LOW;
-  if (cu ^ cd) { applyCommand("curtain", cu ? "up" : "down"); }
-  else if (curtain.state != FAULT && (curtain.state==MOVING_OPEN||curtain.state==MOVING_CLOSE) && !cu && !cd) {
-    // 仅当上一次是手动点动时停; 自动运动靠限位/指令停, 这里不强停
-  }
-  if (vo ^ vc) { applyCommand("vent", vo ? "open" : "close"); }
+  if (curtainId >= 0 && (cu ^ cd)) applyCommand(curtainId, cu ? "up" : "down");
+  if (ventId >= 0 && (vo ^ vc)) applyCommand(ventId, vo ? "open" : "close");
+#endif
 }
 
 // ----------------------- 遥测上报 -----------------------
@@ -207,40 +232,46 @@ void publishTelemetry() {
     if (!isnan(h)) doc["humidity"] = h;
   }
   if (hasLux) doc["lux"] = lightMeter.readLightLevel();
-  doc["curtain_current"] = readCurrent(curtain.adcCurrent);
-  doc["vent_current"] = readCurrent(vent.adcCurrent);
-  doc["curtain_state"] = motionStr(curtain.state);
-  doc["vent_state"] = motionStr(vent.state);
-  if (curtain.faultReason[0]) doc["curtain_fault_reason"] = curtain.faultReason;
-  if (vent.faultReason[0]) doc["vent_fault_reason"] = vent.faultReason;
-  if (curtain.pulsesFull > 0)
-    doc["curtain_position"] = constrain(curtain.position * 100.0f / curtain.pulsesFull, 0.0f, 100.0f);
-  if (vent.pulsesFull > 0)
-    doc["vent_position"] = constrain(vent.position * 100.0f / vent.pulsesFull, 0.0f, 100.0f);
-  doc["curtain_pulses"] = curtain.seenPulses; // 现场标定全行程脉冲数用
-  doc["vent_pulses"] = vent.seenPulses;
-  JsonObject lim = doc["limits"].to<JsonObject>();
-  lim["curtain_top"] = limitTriggered(curtain.limitOpen);
-  lim["curtain_bottom"] = limitTriggered(curtain.limitClose);
-  lim["vent_open"] = limitTriggered(vent.limitOpen);
-  lim["vent_closed"] = limitTriggered(vent.limitClose);
 
-  char buf[512]; size_t n = serializeJson(doc, buf);
+  // 每台电机一项 (后端由 motors 数组回填旧版 curtain_*/vent_* 字段)
+  JsonArray arr = doc["motors"].to<JsonArray>();
+  for (int i = 0; i < MOTOR_COUNT; i++) {
+    Actuator &a = motors[i];
+    JsonObject m = arr.add<JsonObject>();
+    m["id"] = i;
+    m["type"] = a.prm.type == 0 ? "curtain" : "vent";
+    m["name"] = a.prm.name;
+    m["state"] = motionStr(a.state);
+    m["current"] = readCurrent(a);
+    if (a.prm.pulsesFull > 0)
+      m["position"] = constrain(a.position * 100.0f / a.prm.pulsesFull, 0.0f, 100.0f);
+    if (a.faultReason[0]) m["fault_reason"] = a.faultReason;
+    m["pulses"] = a.seenPulses; // 现场标定全行程脉冲数用
+    m["limit_open"] = limitOpenHit(a);
+    m["limit_close"] = limitCloseHit(a);
+  }
+
+  char buf[1024]; size_t n = serializeJson(doc, buf);
   mqtt.publish(topicTelemetry, buf, n);
 }
 
-// 断网兜底: 无 MQTT 连接时, 本地按温湿度/光照自动控制
+// 断网兜底: 无 MQTT 连接时, 本地按温湿度/光照自动控制 (按类型作用到每台电机)
 void localFallback() {
   if (!hasSht) return;
   float t = sht31.readTemperature();
   float lux = hasLux ? lightMeter.readLightLevel() : NAN;
-  if (!isnan(t)) {
-    if (t > LOCAL_VENT_TEMP_HIGH) actuatorMove(vent, true);
-    else if (t < LOCAL_VENT_TEMP_HIGH - LOCAL_VENT_TEMP_HYST) actuatorMove(vent, false);
-    if (t < LOCAL_CURTAIN_TEMP_PROTECT) actuatorMove(curtain, false);      // 低温保温优先
-    else if (!isnan(lux)) {
-      if (lux > LOCAL_CURTAIN_LUX_OPEN) actuatorMove(curtain, true);
-      else if (lux < LOCAL_CURTAIN_LUX_CLOSE) actuatorMove(curtain, false);
+  if (isnan(t)) return;
+  for (int i = 0; i < MOTOR_COUNT; i++) {
+    Actuator &a = motors[i];
+    if (a.prm.type == 1) {  // 风口
+      if (t > LOCAL_VENT_TEMP_HIGH) actuatorMove(a, true);
+      else if (t < LOCAL_VENT_TEMP_HIGH - LOCAL_VENT_TEMP_HYST) actuatorMove(a, false);
+    } else {                // 卷帘
+      if (t < LOCAL_CURTAIN_TEMP_PROTECT) actuatorMove(a, false);  // 低温保温优先
+      else if (!isnan(lux)) {
+        if (lux > LOCAL_CURTAIN_LUX_OPEN) actuatorMove(a, true);
+        else if (lux < LOCAL_CURTAIN_LUX_CLOSE) actuatorMove(a, false);
+      }
     }
   }
 }
@@ -278,18 +309,52 @@ void setupModem() {
 void setup() {
   SerialMon.begin(115200); delay(100);
 
-  uint8_t outs[] = { RELAY_CURTAIN_UP, RELAY_CURTAIN_DOWN, RELAY_VENT_OPEN, RELAY_VENT_CLOSE };
-  for (uint8_t p : outs) { pinMode(p, OUTPUT); relayWrite(p, false); }
-  uint8_t ins[] = { LIMIT_CURTAIN_TOP, LIMIT_CURTAIN_BOTTOM, LIMIT_VENT_OPEN, LIMIT_VENT_CLOSED,
-                    BTN_CURTAIN_UP, BTN_CURTAIN_DOWN, BTN_VENT_OPEN, BTN_VENT_CLOSE };
-  for (uint8_t p : ins) pinMode(p, INPUT_PULLUP);
-
-  pinMode(HALL_CURTAIN, INPUT_PULLUP);
-  pinMode(HALL_VENT, INPUT_PULLUP);
-  attachInterrupt(digitalPinToInterrupt(HALL_CURTAIN), curtainPulseISR, FALLING);
-  attachInterrupt(digitalPinToInterrupt(HALL_VENT), ventPulseISR, FALLING);
-
   Wire.begin(I2C_SDA, I2C_SCL);
+#ifdef USE_EXPANDER
+  if (!mcp.begin_I2C()) SerialMon.println("MCP23017 未检测到!");
+  if (!ads.begin()) SerialMon.println("ADS1115 未检测到!");
+#endif
+
+  // 初始化电机数组与 IO
+  for (int i = 0; i < MOTOR_COUNT; i++) {
+    Actuator &a = motors[i];
+    a.io = MOTOR_IO[i];
+    a.prm = MOTOR_PARAMS[i];
+    a.state = IDLE;
+    a.seenPulses = 0; a.position = 0;
+    a.moveStartMs = a.lastPulseMs = 0;
+    a.faultReason = "";
+    pulseCount[i] = 0;
+
+#ifdef USE_EXPANDER
+    if (a.io.onExpander) {
+      mcp.pinMode(a.io.relayOpen, OUTPUT);
+      mcp.pinMode(a.io.relayClose, OUTPUT);
+      mcp.pinMode(a.io.limitOpen, INPUT_PULLUP);
+      mcp.pinMode(a.io.limitClose, INPUT_PULLUP);
+    } else
+#endif
+    {
+      pinMode(a.io.relayOpen, OUTPUT);
+      pinMode(a.io.relayClose, OUTPUT);
+      pinMode(a.io.limitOpen, INPUT_PULLUP);
+      pinMode(a.io.limitClose, INPUT_PULLUP);
+    }
+    relayWrite(a.io, a.io.relayOpen, false);
+    relayWrite(a.io, a.io.relayClose, false);
+
+    if (a.io.hall >= 0) {
+      pinMode(a.io.hall, INPUT_PULLUP);
+      attachInterruptArg(digitalPinToInterrupt(a.io.hall), pulseISR,
+                         (void*)&pulseCount[i], FALLING);
+    }
+  }
+
+#if MOTOR_COUNT <= 2
+  uint8_t btns[] = { BTN_CURTAIN_UP, BTN_CURTAIN_DOWN, BTN_VENT_OPEN, BTN_VENT_CLOSE };
+  for (uint8_t p : btns) pinMode(p, INPUT_PULLUP);
+#endif
+
   hasSht = sht31.begin(0x44);
   hasLux = lightMeter.begin();
 
@@ -301,14 +366,13 @@ void setup() {
   setupModem();
   mqtt.setServer(MQTT_HOST, MQTT_PORT);
   mqtt.setCallback(mqttCallback);
-  mqtt.setBufferSize(512);
+  mqtt.setBufferSize(1024);
   mqttConnect();
 }
 
 void loop() {
   // 安全监控始终最高优先级
-  actuatorSafety(curtain, curtainPulses);
-  actuatorSafety(vent, ventPulses);
+  for (int i = 0; i < MOTOR_COUNT; i++) actuatorSafety(motors[i], pulseCount[i]);
   scanButtons();
 
   if (mqtt.connected()) {
